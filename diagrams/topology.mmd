@@ -1,0 +1,63 @@
+flowchart LR
+  subgraph Users["Business users"]
+    U[Browser]
+  end
+
+  subgraph Edge["DMZ VLAN 20"]
+    F5["F5 BIG-IP + NGINX API GW\nWAF, TLS, rate-limit"]
+  end
+
+  subgraph OCP["OCP VLAN 30 (vSphere)"]
+    direction TB
+    CP["3x Control-plane VMs\n(etcd, kube-api)"]
+    W["3x Worker VMs\n(Ingress HAProxy + apps)"]
+    CP --- W
+    subgraph Obs["In-cluster"]
+      LOG["Logging\nEFK / Loki + Kibana"]
+      MON["Monitoring\nProm + Alertmanager + Grafana"]
+      BKP["Kasten K10"]
+      AQE["Aqua Enforcer"]
+      ESO["External Secrets Operator"]
+    end
+  end
+
+  subgraph Data["Data VLAN 40"]
+    SQL[(MSSQL AG\nPri/Sec)]
+    RDS[(Redis cluster)]
+    AMQ[(ActiveMQ cluster)]
+    KAF[(Kafka Pri/Sec)]
+  end
+
+  subgraph Sec["DevSecOps VLAN 50"]
+    JEN[Jenkins]
+    NEX[Nexus]
+    SON[SonarQube]
+    CXS[Checkmarx]
+    AQS[Aqua Server]
+  end
+
+  subgraph Vault["VLAN 60"]
+    CA[CyberArk Vault]
+  end
+
+  subgraph Backup["VLAN 70"]
+    S3[(S3/NFS + Object Lock)]
+  end
+
+  ADO[ADO Repos] --> JEN
+  JEN -->|"SAST"| SON
+  JEN --> CXS
+  JEN -->|"build/push"| NEX
+  JEN -->|"scan"| AQS
+  JEN -->|"helm upgrade --atomic"| CP
+  JEN <-->|"fetch creds"| CA
+
+  U --> F5 --> W
+  W --> SQL
+  W --> RDS
+  W --> AMQ
+  W --> KAF
+  W -->|"ExternalSecret"| CA
+
+  AQE --> AQS
+  BKP --> S3

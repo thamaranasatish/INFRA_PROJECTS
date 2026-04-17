@@ -1,0 +1,103 @@
+---
+# Ansible preflight — run from bastion against planned OCP node IPs BEFORE
+# powering on RHCOS VMs. Validates DNS, NTP, reachability and F5 health.
+#
+#   ansible-playbook -i inventory.ini preflight.yml
+#
+# Exits non-zero on any failure. Suitable as a Phase-3 gate in the CD pipeline.
+
+- name: OCP preflight
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cluster_base: ocp.corp.local
+    masters: [master-0, master-1, master-2]
+    workers: [worker-0, worker-1, worker-2]
+    api_vip:  10.10.30.100
+    apps_vip: 10.10.30.101
+    f5_api_port: 6443
+    f5_apps_port: 443
+    ntp_servers: ["ntp1.corp.local", "ntp2.corp.local"]
+
+  tasks:
+    - name: Forward DNS — api
+      ansible.builtin.command: dig +short api.{{ cluster_base }}
+      register: r_api
+      changed_when: false
+      failed_when: api_vip not in r_api.stdout
+
+    - name: Forward DNS — apps wildcard
+      ansible.builtin.command: dig +short test.apps.{{ cluster_base }}
+      register: r_apps
+      changed_when: false
+      failed_when: apps_vip not in r_apps.stdout
+
+    - name: Forward+reverse for every master/worker
+      loop: "{{ masters + workers }}"
+      ansible.builtin.shell: |
+        set -e
+        ip=$(dig +short {{ item }}.{{ cluster_base }})
+        [ -n "$ip" ] || { echo "no A record for {{ item }}"; exit 1; }
+        rev=$(dig +short -x "$ip")
+        echo "$rev" | grep -q "{{ item }}.{{ cluster_base }}" || { echo "PTR mismatch for $ip"; exit 1; }
+      changed_when: false
+
+    - name: etcd SRV records present
+      loop: "{{ masters }}"
+      ansible.builtin.command: dig +short SRV _etcd-server-ssl._tcp.{{ cluster_base }}
+      register: r_srv
+      changed_when: false
+      failed_when: r_srv.stdout == ""
+
+    - name: F5 API VIP reachable
+      ansible.builtin.wait_for:
+        host: "{{ api_vip }}"
+        port: "{{ f5_api_port }}"
+        timeout: 5
+        state: started
+
+    - name: F5 apps VIP reachable
+      ansible.builtin.wait_for:
+        host: "{{ apps_vip }}"
+        port: "{{ f5_apps_port }}"
+        timeout: 5
+        state: started
+
+    - name: NTP servers reachable
+      loop: "{{ ntp_servers }}"
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 123
+        timeout: 5
+        state: started
+
+    - name: Corporate egress proxy reachable
+      ansible.builtin.uri:
+        url: "http://proxy.corp.local:8080"
+        return_content: false
+        status_code: [200, 400, 403]  # any response means reachable
+        validate_certs: false
+
+    - name: Red Hat mirror reachable through proxy
+      ansible.builtin.uri:
+        url: https://mirror.openshift.com/
+        validate_certs: true
+        status_code: 200
+      environment:
+        https_proxy: http://proxy.corp.local:8080
+
+    - name: Nexus registry reachable
+      ansible.builtin.uri:
+        url: https://nexus.corp.local:8082/v2/
+        validate_certs: true
+        status_code: [200, 401]
+
+    - name: CyberArk CCP reachable
+      ansible.builtin.uri:
+        url: https://cyberark.corp.local/AIMWebService/api/accounts
+        validate_certs: true
+        status_code: [200, 400, 401, 403]
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "Preflight passed — safe to proceed with terraform apply."

@@ -1,0 +1,73 @@
+# Template for: openshift-install create install-config
+# Replace placeholders marked <<...>> before use. Do NOT commit the filled file
+# (it contains the pull-secret and SSH key).
+
+apiVersion: v1
+baseDomain: corp.local
+metadata:
+  name: ocp                     # results in cluster domain: ocp.corp.local
+
+controlPlane:
+  name: master
+  replicas: 3
+  hyperthreading: Enabled
+  architecture: amd64
+
+compute:
+- name: worker
+  replicas: 3
+  hyperthreading: Enabled
+  architecture: amd64
+
+networking:
+  networkType: OVNKubernetes
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  serviceNetwork:
+  - 172.30.0.0/16
+  machineNetwork:
+  - cidr: 10.10.30.0/24
+
+platform:
+  vsphere:
+    vcenters:
+    - server: <<vcenter.corp.local>>
+      user:     <<svc-ocp@vsphere.local>>
+      password: <<cyberark-inject>>
+      datacenters:
+      - <<DC1>>
+    failureDomains:
+    - name: primary
+      region: region1
+      zone:   zone1
+      server: <<vcenter.corp.local>>
+      topology:
+        datacenter:    <<DC1>>
+        computeCluster: /<<DC1>>/host/<<ocp-cluster>>
+        networks:      [ <<OCP-VLAN30>> ]
+        datastore:     /<<DC1>>/datastore/<<ds-ocp-app>>
+        resourcePool:  /<<DC1>>/host/<<ocp-cluster>>/Resources/<<rp-ocp>>
+        folder:        /<<DC1>>/vm/<<ocp>>
+    apiVIPs:
+    - 10.10.30.100
+    ingressVIPs:
+    - 10.10.30.101
+
+proxy:
+  httpProxy:  http://proxy.corp.local:8080
+  httpsProxy: http://proxy.corp.local:8080
+  noProxy: .cluster.local,.svc,.corp.local,10.10.0.0/16,10.128.0.0/14,172.30.0.0/16,localhost,127.0.0.1
+
+additionalTrustBundle: |
+  -----BEGIN CERTIFICATE-----
+  <<corporate-root-CA>>
+  -----END CERTIFICATE-----
+
+fips: false   # set true if FIPS required; requires FIPS-enabled RHEL bastion
+
+pullSecret: '<<paste from https://console.redhat.com/openshift/install/pull-secret>>'
+sshKey: '<<ssh-ed25519 AAAA... ops@bastion>>'
+
+# Optional: disconnected/mirror install
+# imageContentSources: ...

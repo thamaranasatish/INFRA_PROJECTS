@@ -1,0 +1,107 @@
+---
+# Minimal RHEL 9 baseline hardening for service VMs (Jenkins, Nexus, Sonar...).
+# Run BEFORE installing any tooling. Apply CIS L1 via OpenSCAP afterwards.
+
+- name: RHEL 9 baseline
+  hosts: service_vms
+  become: true
+  vars:
+    ntp_servers: ["ntp1.corp.local", "ntp2.corp.local"]
+    siem_host: "siem.corp.local"
+    siem_port: 6514
+    allowed_ssh_group: "linux-admins"
+
+  tasks:
+    - name: Ensure chrony installed + configured
+      ansible.builtin.package: { name: chrony, state: present }
+
+    - name: Write chrony.conf
+      ansible.builtin.copy:
+        dest: /etc/chrony.conf
+        mode: "0644"
+        content: |
+          {% for s in ntp_servers %}
+          server {{ s }} iburst
+          {% endfor %}
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+      notify: restart chrony
+
+    - name: SSH hardening
+      ansible.builtin.blockinfile:
+        path: /etc/ssh/sshd_config.d/99-hardening.conf
+        create: true
+        mode: "0600"
+        block: |
+          PermitRootLogin no
+          PasswordAuthentication no
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+          MaxAuthTries 3
+          AllowGroups {{ allowed_ssh_group }}
+          Protocol 2
+      notify: restart sshd
+
+    - name: auditd installed + enabled
+      ansible.builtin.package: { name: audit, state: present }
+
+    - name: auditd remote logging to SIEM
+      ansible.builtin.copy:
+        dest: /etc/audit/plugins.d/au-remote.conf
+        mode: "0640"
+        content: |
+          active = yes
+          direction = out
+          path = /sbin/audisp-remote
+          type = always
+          format = string
+      notify: restart auditd
+
+    - name: audisp-remote target
+      ansible.builtin.copy:
+        dest: /etc/audit/audisp-remote.conf
+        mode: "0640"
+        content: |
+          remote_server = {{ siem_host }}
+          port = {{ siem_port }}
+          transport = tcp
+          format = ascii
+      notify: restart auditd
+
+    - name: Firewalld default zone = drop, open only required ports
+      ansible.posix.firewalld:
+        zone: public
+        state: enabled
+        permanent: true
+        immediate: true
+        port: "{{ item }}"
+      loop:
+        - 22/tcp
+
+    - name: Disable unused services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop: [ cups, avahi-daemon ]
+      ignore_errors: true
+
+    - name: Kernel parameters (sysctl)
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { key: net.ipv4.conf.all.rp_filter,          value: "1" }
+        - { key: net.ipv4.conf.default.rp_filter,      value: "1" }
+        - { key: net.ipv4.tcp_syncookies,              value: "1" }
+        - { key: net.ipv4.conf.all.accept_redirects,   value: "0" }
+        - { key: net.ipv4.conf.all.send_redirects,     value: "0" }
+        - { key: kernel.randomize_va_space,            value: "2" }
+
+  handlers:
+    - { name: restart chrony, ansible.builtin.service: { name: chronyd, state: restarted } }
+    - { name: restart sshd,   ansible.builtin.service: { name: sshd,    state: restarted } }
+    - { name: restart auditd, ansible.builtin.service: { name: auditd,  state: restarted } }
